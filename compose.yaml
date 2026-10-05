@@ -1,0 +1,126 @@
+# TYPO3 (composer mode) stack: nginx -> PHP-FPM/TYPO3 -> MariaDB, plus phpMyAdmin.
+#
+# First start:   ./scripts/init-env.sh && docker compose up -d --build
+# Backup:        ./scripts/backup.sh              -> backups/typo3-backup-<timestamp>.zip
+# Restore:       ./scripts/restore.sh <backup.zip>
+#
+# The TYPO3 project (composer.json, config/, packages/, public/, vendor/) lives in ./app on the host.
+
+name: ${COMPOSE_PROJECT_NAME:-typo3}
+
+x-backup-scripts:
+  backup: ./scripts/backup.sh
+  restore: ./scripts/restore.sh
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  db:
+    <<: *hardening
+    image: mariadb:11.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-typo3}
+      MARIADB_USER: ${DB_USER:-typo3}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set in .env}
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  typo3:
+    <<: *hardening
+    build:
+      context: ./docker/typo3
+      args:
+        PHP_VERSION: ${PHP_VERSION:-8.3}
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    image: ${COMPOSE_PROJECT_NAME:-typo3}-php:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TYPO3_VERSION: ${TYPO3_VERSION:-^13.4}
+      TYPO3_CONTEXT: ${TYPO3_CONTEXT:-Production}
+      TYPO3_TRUSTED_HOSTS_PATTERN: ${TYPO3_TRUSTED_HOSTS_PATTERN:-localhost(:[0-9]+)?}
+      TYPO3_DB_DRIVER: mysqli
+      TYPO3_DB_HOST: db
+      TYPO3_DB_PORT: "3306"
+      TYPO3_DB_DBNAME: ${DB_NAME:-typo3}
+      TYPO3_DB_USERNAME: ${DB_USER:-typo3}
+      TYPO3_DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      # Only used by the one-time automatic `typo3 setup` on first start
+      TYPO3_AUTO_SETUP: ${TYPO3_AUTO_SETUP:-1}
+      TYPO3_SERVER_TYPE: other
+      TYPO3_PROJECT_NAME: ${TYPO3_PROJECT_NAME:-TYPO3}
+      TYPO3_SETUP_ADMIN_USERNAME: ${TYPO3_ADMIN_USER:-admin}
+      TYPO3_SETUP_ADMIN_PASSWORD: ${TYPO3_ADMIN_PASSWORD:-}
+      TYPO3_SETUP_ADMIN_EMAIL: ${TYPO3_ADMIN_EMAIL:-}
+      TYPO3_SETUP_CREATE_SITE: ${TYPO3_BASE_URL:-http://localhost:8080/}
+    volumes:
+      - ./app:/var/www/html:z
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      # php-fpm only starts listening once the entrypoint (composer / setup) has finished
+      test: ["CMD-SHELL", "SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect 127.0.0.1:9000 | grep -q pong"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 600s
+
+  web:
+    <<: *hardening
+    image: nginx:1.28-alpine
+    depends_on:
+      typo3:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:80"
+    volumes:
+      # Same path as in the typo3 container, read-only: nginx serves static files, PHP goes to FPM
+      - ./app:/var/www/html:ro,z
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro,z
+    networks:
+      - frontend
+
+  phpmyadmin:
+    <<: *hardening
+    image: phpmyadmin:5.2
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PMA_HOST: db
+      UPLOAD_LIMIT: 256M
+      HIDE_PHP_VERSION: "true"
+    ports:
+      # Always bound to localhost only – reach it remotely via SSH tunnel, never expose it publicly
+      - "127.0.0.1:${PMA_PORT:-8081}:80"
+    networks:
+      - backend
+      - frontend
+
+networks:
+  frontend:
+  backend:
+    # No outbound/inbound internet for the database network
+    internal: true
+
+volumes:
+  db-data:
