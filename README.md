@@ -56,6 +56,22 @@ The archive contains:
 Regenerable data (`_processed_`, `_temp_`, `var/cache`) is excluded. FAL storages with an absolute path
 outside the project are reported with a warning and must be backed up separately.
 
+### Migrating an existing (non-Docker) installation
+
+`scripts/backup-native.sh` is self-contained: copy it to the server running a composer-based TYPO3 and run it
+there (as the web server user or root). It writes the same archive format, which `restore.sh` then imports.
+
+```bash
+./backup-native.sh /var/www/site -o /root/typo3-backups
+./backup-native.sh --fix-mysql8-collations /var/www/site     # source DB is MySQL 8
+TYPO3_DB_PASSWORD=… ./backup-native.sh --db-host 127.0.0.1 --db-user backup /var/www/site
+```
+
+DB credentials are read from `settings.php`/`additional.php` (or `LocalConfiguration.php` on TYPO3 ≤ 11).
+Passwords are put into a temporary mode-600 option file and are never passed on the command line. Symlinks
+that point out of the project (for example a shared `fileadmin`) are copied into the archive. Absolute
+links into the project are rewritten as relative links.
+
 ## Restore
 
 ```bash
@@ -79,7 +95,12 @@ It works on an empty checkout too: `./scripts/init-env.sh && ./scripts/restore.s
   because the scripts use `MYSQL_PWD` inside the container. The TYPO3 setup password is not forwarded to PHP-FPM.
 - **Network exposure**: HTTP binds to `127.0.0.1` by default (`BIND_ADDRESS`). phpMyAdmin is *always*
   localhost-only; reach it via SSH tunnel. MariaDB is on an `internal` network with no published port.
-  Put a TLS-terminating reverse proxy in front for anything beyond local use.
+  Put a TLS-terminating reverse proxy in front for anything beyond local use: see
+  [`proxy/typo3-proxy.conf`](proxy/typo3-proxy.conf) (host nginx, Let's Encrypt, HSTS, login rate limit), or
+  [`proxy/ispconfig-nginx-directives.conf`](proxy/ispconfig-nginx-directives.conf) on an ISPConfig server.
+  Both use [`proxy/conf.d/`](proxy/conf.d/) and [`proxy/snippets/`](proxy/snippets/).
+  The stack's nginx trusts `X-Forwarded-Proto`/`-For` only from the Docker bridge, and passes `HTTPS=on`
+  and the real client IP to TYPO3.
 - **Hardening**: `no-new-privileges` on all containers, PHP runs as an unprivileged user, `expose_php`/`server_tokens` off,
   nginx blocks TYPO3's protected files.
 - **Backups contain secrets**: `config/system/settings.php` holds the TYPO3 `encryptionKey` and the install-time

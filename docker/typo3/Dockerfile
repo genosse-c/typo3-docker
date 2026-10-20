@@ -11,8 +11,11 @@ ARG HOST_GID=1000
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        git unzip graphicsmagick ghostscript libfcgi-bin \
+        git unzip graphicsmagick ghostscript libfcgi-bin locales \
         libfreetype6-dev libjpeg62-turbo-dev libpng-dev libwebp-dev libzip-dev libicu-dev; \
+    # System locales for the site languages (TYPO3 calls setlocale() with the site's locale)
+    printf '%s UTF-8\n' en_US.UTF-8 en_GB.UTF-8 de_DE.UTF-8 > /etc/locale.gen; \
+    locale-gen; \
     docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp; \
     docker-php-ext-install -j"$(nproc)" gd intl mysqli pdo_mysql zip opcache exif; \
     rm -rf /var/lib/apt/lists/*
